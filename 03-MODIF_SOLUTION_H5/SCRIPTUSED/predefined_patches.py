@@ -45,7 +45,7 @@ PREDEFINED_PATCHES = [
         "height":      0.105,
         "r_inner":     0.0,
         "r_outer":     0.003,
-        "transition_thickness": 0.002,
+        "transition_thickness": 0.001,
     },
     {
         "name":        "HYLON_SWIRLER_ext",
