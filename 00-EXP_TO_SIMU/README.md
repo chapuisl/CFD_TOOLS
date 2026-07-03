@@ -51,13 +51,13 @@ The script is organized in four layers, so that both input types converge to a s
 calculation path:
 
 ```
-┌─────────────────────────────┐   ┌─────────────────────────────┐
-│   Input type "power"        │   │   Input type "NL"           │
-│   (Pth, alpha_H2, PhiGlobal)│   │   (m_AIR_NL, m_H2_NL,        │
+┌──────────────────────────────┐   ┌──────────────────────────────┐
+│   Input type "power"         │   │   Input type "NL"            │
+│  (Pth, alpha_H2, PhiGlobal)  │   │   (m_AIR_NL, m_H2_NL,        │
 │                              │   │    m_NH3_NL)                 │
 └──────────────┬───────────────┘   └──────────────┬───────────────┘
-               │ flows_from_thermal_power()        │ flows_from_NL()
-               └──────────────────┬─────────────────┘
+               │ flows_from_thermal_power()       │ flows_from_NL()
+               └───────────────────┬──────────────┘
                                    ▼
                      common mass flow rates (kg/s)
                         m_AIR, m_H2, m_NH3
