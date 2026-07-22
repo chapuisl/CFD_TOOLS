@@ -1,89 +1,112 @@
-#!/usr/bin/env python3
 """
-mesh_slice_viridis.py
-
-Read a mesh stored in an HDF5 file (points + cell connectivity),
-cut it with a user-defined plane, and save a PNG image of the
-resulting cross-section, colored with the 'viridis' colormap
-according to local mesh (cell) size.
-
-------------------------------------------------------------------
-HOW IT WORKS
-------------------------------------------------------------------
-1. The HDF5 file is opened and scanned for two datasets:
-     - a "points" dataset of shape (N, 3)  -> node coordinates
-     - a "cells" dataset (or group of datasets) containing the
-       connectivity (indices of points forming each cell/element)
-
-   Common dataset names are tried automatically (see
-   POINTS_KEY_CANDIDATES / CELLS_KEY_CANDIDATES below). If your
-   file uses different names, pass them explicitly with
-   --points-key and --cells-key, or run with --inspect to print
-   the full HDF5 structure first.
-
-2. A cutting plane is defined either by:
-     - an axis + a position   (--axis x|y|z --position VALUE)
-     - or a point + a normal  (--point px py pz --normal nx ny nz)
-   If neither is given on the command line, the script INTERACTIVELY
-   ASKS the user (in the terminal) how to define the plane: axis +
-   position, or point + normal, showing the mesh bounding box to
-   help choose sensible values.
-
-3. Cells whose center lies within a thin slab around the plane
-   (thickness controlled by --tol) are selected. This gives the
-   cross-section of the mesh.
-
-4. For each selected cell, a characteristic size is computed
-   (mean edge length of the cell). The cross-section is drawn as
-   a wireframe (cell edges) projected onto the cutting plane,
-   colored with the viridis colormap according to that size.
-
-5. The figure is saved as a PNG file.
-
-------------------------------------------------------------------
-USAGE EXAMPLES
-------------------------------------------------------------------
-# Just inspect the HDF5 file structure first
-python mesh_slice_viridis.py point.h5 --inspect
-
-# Cut with the plane z = 0.5
-python mesh_slice_viridis.py point.h5 --axis z --position 0.5 -o slice_z.png
-
-# Cut with an arbitrary plane (point + normal)
-python mesh_slice_viridis.py point.h5 --point 0 0 0 --normal 1 1 0 -o slice_oblique.png
-
-# If dataset names are not auto-detected
-python mesh_slice_viridis.py point.h5 --points-key /mesh/points --cells-key /mesh/cells
+# ===================================================================================================================
+#  Mesh Slice Viewer - Main Program
+# ===================================================================================================================
+#
+#  Author          : Lilian CHAPUIS
+#  Affiliation     : IMFT - Institut de Mecanique des Fluides de Toulouse
+#  Location        : Toulouse, France
+#  Creation Date   : 22 July 2026
+#  Last Modified   : 22 July 2026
+#  Version         : 1.0.00
+#
+# -------------------------------------------------------------------------------------------------------------------
+#  DESCRIPTION
+# -------------------------------------------------------------------------------------------------------------------
+#  Slice a CFD tetrahedral mesh stored in an HDF5 file (HIP/AVBP-style: separate
+#  Coordinates/x,y,z datasets + a flat Connectivity/tet->node array) along a
+#  user-defined plane, and export the resulting cross-section as a PNG image,
+#  colored by local cell size (equivalent tetrahedron diameter).
+#
+#  This script orchestrates the complete workflow:
+#      - HDF5 mesh inspection and loading
+#      - Interactive or command-line cutting-plane definition (axis-aligned
+#        or arbitrary point + normal)
+#      - Optional Z-zoom on predefined combustor zones (INLET_SWIRLER,
+#        FLAME, COMB_CHAMBER)
+#      - Cell selection near the cutting plane and characteristic-size
+#        computation
+#      - Colormap selection and cross-section plotting (log color scale,
+#        plain-number tick labels)
+#      - PNG export of the cross-section + PDF export of the colorbar legend
+#
+# -------------------------------------------------------------------------------------------------------------------
+#  USAGE EXAMPLES
+# -------------------------------------------------------------------------------------------------------------------
+#  python mesh_slice_viridis.py mesh.h5 --inspect
+#  python mesh_slice_viridis.py mesh.h5 --axis z --position 0.5
+#  python mesh_slice_viridis.py mesh.h5 --point 0 0 0 --normal 1 1 0
+#  python mesh_slice_viridis.py mesh.h5   # fully interactive
+#
+# -------------------------------------------------------------------------------------------------------------------
+#  COPYRIGHT NOTICE
+# -------------------------------------------------------------------------------------------------------------------
+#  (c) 2026 Lilian CHAPUIS - All Rights Reserved.
+#
+#  This file and its structure are protected by intellectual property rights.
+#  Unauthorized copying, distribution, modification, or use of this file
+#  without prior written permission of the author is strictly prohibited.
+#
+# ===================================================================================================================
 """
 
+"""
+# ===================================================================================================================
+#  Imports from standard library
+# ===================================================================================================================
+"""
 import argparse
 import sys
 
+"""
+# ===================================================================================================================
+#  Imports from third-party libraries
+# ===================================================================================================================
+"""
 import h5py
 import numpy as np
 import matplotlib
 
-matplotlib.use("Agg")  
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
-from matplotlib.ticker import FormatStrFormatter
+from matplotlib.ticker import LogLocator, FuncFormatter, NullLocator, NullFormatter
 from matplotlib.collections import PolyCollection
 
 
-# ----------------------------------------------------------------
-# Common dataset name candidates (adjust/extend if needed)
-# ----------------------------------------------------------------
-POINTS_KEY_CANDIDATES = [
-    "points", "Points", "coordinates", "Coordinates",
-    "nodes", "Nodes", "geometry/points", "mesh/points",
-    "Mesh/Points", "/Mesh/coordinates",
-]
+"""
+# ===================================================================================================================
+#  Configuration / constants
+# ===================================================================================================================
+"""
 
-CELLS_KEY_CANDIDATES = [
-    "cells", "Cells", "connectivity", "Connectivity",
-    "elements", "Elements", "topology", "Topology",
-    "mesh/cells", "Mesh/Cells", "/Mesh/connectivity",
-]
+# Predefined Z zoom zones (only meaningful for x- or y-aligned planes)
+ZONES = {
+    "1": ("INLET_SWIRLER", -0.115, 0.005),
+    "2": ("FLAME", -0.04, 0.05),
+    "3": ("COMB_CHAMBER", -0.01, 0.14),
+}
+
+# Available colormaps to choose from interactively
+AVAILABLE_CMAPS = {
+    "1": "viridis",
+    "2": "Reds_r",
+    "3": "Blues_r",
+    "4": "gray",
+    "5": "cividis",
+    "6": "bwr",
+}
+DEFAULT_CMAP = "viridis"
+
+# Maps the --zone CLI argument to the corresponding ZONES key
+ZONE_CLI_MAP = {"inlet": "1", "flame": "2", "comb": "3", "none": None}
+
+
+"""
+# ===================================================================================================================
+#  HDF5 inspection & mesh loading
+# ===================================================================================================================
+"""
 
 
 def inspect_h5(path):
@@ -100,92 +123,64 @@ def inspect_h5(path):
         f.visititems(visitor)
 
 
-def _find_dataset(h5file, explicit_key, candidates, expected_ndim=None):
-    """Try an explicit key first, then a list of common candidate names."""
-    keys_to_try = [explicit_key] if explicit_key else []
-    keys_to_try += candidates
-
-    for key in keys_to_try:
-        if key is None:
-            continue
-        key = key.lstrip("/")
-        if key in h5file:
-            obj = h5file[key]
-            if isinstance(obj, h5py.Dataset):
-                return key, obj[()]
-    return None, None
-
-
 def load_mesh(path, points_key=None, cells_key=None):
     """
-    Load node coordinates and cell connectivity from the HDF5 file.
+    Load node coordinates and tetrahedral connectivity from the HDF5 file.
 
     Returns
     -------
     points : (N, 3) float array
-    cells  : list of 1D integer arrays (variable number of vertices per cell)
-    # """
-
+    cells  : (M, 4) int array of node indices (0-based), one row per tet
+    """
+    points_group = points_key or "Coordinates"
+    px = f"{points_group}/x"
+    py = f"{points_group}/y"
+    pz = f"{points_group}/z"
+    ck = cells_key or "Connectivity/tet->node"
 
     with h5py.File(path, "r") as f:
-
-        # ----- Lecture des coordonnées -----
-        x = f["Coordinates/x"][:]
-        y = f["Coordinates/y"][:]
-        z = f["Coordinates/z"][:]
-
+        x = f[px][:]
+        y = f[py][:]
+        z = f[pz][:]
         points = np.column_stack((x, y, z))
+        print(f"Loaded {len(points)} nodes from '{px}', '{py}', '{pz}'")
 
-        print(f"Loaded {len(points)} nodes")
-
-        # ----- Lecture des tétraèdres -----
-        tet = f["Connectivity/tet->node"][:].reshape(-1, 4)
-
-        # Conversion éventuelle vers l'indexation Python
+        tet = f[ck][:].reshape(-1, 4).astype(np.int64)
         if tet.min() == 1:
-            tet -= 1
+            tet -= 1  # convert from 1-based (Fortran/HIP) to 0-based indexing
+        print(f"Loaded {len(tet)} tetrahedra from '{ck}'")
 
-        cells = [c.astype(int) for c in tet]
-
-        print(f"Loaded {len(cells)} tetrahedra")
-
-        return points, cells
+        return points, tet
 
 
-def cell_edges(cell):
-    """Return list of (i, j) vertex-index pairs forming the edges of a cell."""
-    n = len(cell)
-    return [(cell[k], cell[(k + 1) % n]) for k in range(n)]
+"""
+# ===================================================================================================================
+#  Cell geometry utilities
+# ===================================================================================================================
+"""
+
 
 def tetra_volume(points, cell):
-    """
-    Volume of a tetrahedral cell.
-    """
+    """Volume of a tetrahedral cell."""
     a, b, c, d = points[cell[:4]]
+    return abs(np.linalg.det(np.column_stack((b - a, c - a, d - a)))) / 6.0
 
-    volume = abs(
-        np.linalg.det(
-            np.column_stack((b-a, c-a, d-a))
-        )
-    ) / 6.0
-
-    return volume
 
 def cell_characteristic_size(points, cell):
-    # """Mean edge length of a cell -> used as the local mesh-size metric."""
-    # edges = cell_edges(cell)
-    # lengths = [np.linalg.norm(points[i] - points[j]) for i, j in edges]
-    # return float(np.mean(lengths))
     """
     Equivalent diameter based on tetrahedron volume.
-    h = diameter of sphere with same volume.
+    h = diameter of the sphere with the same volume, in mm
+    (assumes mesh coordinates are in meters).
     """
-
     V = tetra_volume(points, cell)
+    return float(2.0 * (3.0 * V / (4.0 * np.pi)) ** (1.0 / 3.0) * 1e3)
 
-    hcell = 2.0 * (3.0 * V / (4.0 * np.pi))**(1.0/3.0) *1e3
 
-    return float(hcell)
+"""
+# ===================================================================================================================
+#  Cutting-plane geometry
+# ===================================================================================================================
+"""
 
 
 def build_plane(axis, position, point, normal):
@@ -206,28 +201,19 @@ def build_plane(axis, position, point, normal):
 
     plane_normal = plane_normal / np.linalg.norm(plane_normal)
 
-    # Choix de l'orientation de l'affichage
     if axis == "x":
-        # Plan YZ
-        u_axis = np.array([0.0, 1.0, 0.0])   # horizontal = Y
-        v_axis = np.array([0.0, 0.0, 1.0])   # vertical = Z
-
+        u_axis = np.array([0.0, 1.0, 0.0])  # horizontal = Y
+        v_axis = np.array([0.0, 0.0, 1.0])  # vertical   = Z
     elif axis == "y":
-        # Plan XZ
-        u_axis = np.array([1.0, 0.0, 0.0])   # horizontal = X
-        v_axis = np.array([0.0, 0.0, 1.0])   # vertical = Z
-
+        u_axis = np.array([1.0, 0.0, 0.0])  # horizontal = X
+        v_axis = np.array([0.0, 0.0, 1.0])  # vertical   = Z
     elif axis == "z":
-        # Plan XY
-        u_axis = np.array([1.0, 0.0, 0.0])   # horizontal = X
-        v_axis = np.array([0.0, 1.0, 0.0])   # vertical = Y
-
+        u_axis = np.array([1.0, 0.0, 0.0])  # horizontal = X
+        v_axis = np.array([0.0, 1.0, 0.0])  # vertical   = Y
     else:
-        # Plan arbitraire
         helper = np.array([1.0, 0.0, 0.0])
         if abs(np.dot(helper, plane_normal)) > 0.9:
             helper = np.array([0.0, 1.0, 0.0])
-
         u_axis = np.cross(plane_normal, helper)
         u_axis /= np.linalg.norm(u_axis)
         v_axis = np.cross(plane_normal, u_axis)
@@ -235,129 +221,48 @@ def build_plane(axis, position, point, normal):
     return plane_point, plane_normal, u_axis, v_axis
 
 
-def slice_mesh(points, cells, plane_point, plane_normal, tol,u_axis, v_axis):
+def slice_mesh(points, cells, plane_point, plane_normal, tol, u_axis, v_axis):
     """
     Select cells whose centroid lies within `tol` of the cutting plane.
+    Vectorized over the (M, 4) cells array for performance on large meshes.
 
     Returns
     -------
-    segments : list of ((x1, y1), (x2, y2)) edge segments in 2D plane
-               coordinates, ready for a LineCollection
-    values   : array of per-segment mesh-size values (for coloring)
+    polygons : list of (4, 2) arrays -> projected cell vertices, ready
+               for a PolyCollection
+    values   : array of per-cell characteristic-size values (for coloring)
     """
+    cell_pts = points[cells]                      # (M, 4, 3)
+    centroids = cell_pts.mean(axis=1)              # (M, 3)
+    dist = (centroids - plane_point) @ plane_normal
+    mask = np.abs(dist) <= tol
+
+    selected = cells[mask]
+    print(f"Selected {len(selected)} cells near the cutting plane")
+
+    p0u = plane_point @ u_axis
+    p0v = plane_point @ v_axis
 
     polygons = []
-    values = []
-
-    for cell in cells:
-        if len(cell) < 2:
-            continue
+    values = np.empty(len(selected))
+    for n, cell in enumerate(selected):
         verts = points[cell]
-        centroid = verts.mean(axis=0)
-        dist = np.dot(centroid - plane_point, plane_normal)
+        uv = np.column_stack((verts @ u_axis - p0u, verts @ v_axis - p0v))
+        polygons.append(uv)
+        values[n] = cell_characteristic_size(points, cell)
 
-        if abs(dist) > tol:
-            continue
-
-        size = cell_characteristic_size(points, cell)
-
-        poly = []
-
-        for p in verts:
-            poly.append([
-                np.dot(p - plane_point, u_axis),
-                np.dot(p - plane_point, v_axis),
-            ])
-
-        polygons.append(poly)
-        values.append(size)
-
-    return polygons, np.array(values)
+    return polygons, values
 
 
-def plot_slice(polygons, values, output_path, title=None):
+"""
+# ===================================================================================================================
+#  Interactive prompts
+# ===================================================================================================================
+"""
 
-    if len(polygons) == 0:
-        raise RuntimeError("No cells selected.")
-
-    fig, ax = plt.subplots(figsize=(9,8))
-
-    available_maps = {
-        "1": "viridis",
-        "2": "Reds_r",
-        "3": "Blues_r",
-        "4": "gray",
-        "5": "cividis",
-        "6": "bwr"
-    }
-    default_cmap = "Reds_r" 
-    print("\nChoose a colormap for mesh size visualization:")
-    for key, cmap in available_maps.items():
-        print(f"{key}: {cmap}")
-
-    max_attempts = 2
-    Color_choice = False
-    for attempt in range(max_attempts):
-        choice = input("\nEnter your choice (1-6): ")
-
-        if choice in available_maps:
-            selected = available_maps[choice]
-            print(f"Selected colormap: {selected}")
-            Color_choice = True
-            break
-
-        else:
-            print(f"Invalid choice. Attempt {attempt+1}/{max_attempts}")
-    
-    if Color_choice is False:
-        selected = default_cmap
-
-    values_log = np.maximum(values, 1e-12)
-
-    pc = PolyCollection(
-    polygons,
-    array=values,
-    cmap=selected,
-    norm=LogNorm(
-        vmin=max(values.min(),1e-12),
-        vmax=values.max()
-    ),
-    edgecolors="black",
-    linewidths=0.1,
-)
-
-    ax.add_collection(pc)
-
-    pts = np.vstack([np.asarray(p) for p in polygons])
-
-    # margin = 0.02 * (pts.max(axis=0) - pts.min(axis=0))
-
-    ax.set_xlim(pts[:,0].min()-margin[0], pts[:,0].max()+margin[0])
-    ax.set_ylim(pts[:,1].min()-margin[1], pts[:,1].max()+margin[1])
-
-    ax.set_aspect("equal")
-
-    cbar = fig.colorbar(pc, ax=ax)
-    cbar.set_label("Cell size [mm]")
-    cbar.ax.yaxis.set_major_formatter(
-        FormatStrFormatter('%.3f')
-    )
-
-    if title:
-        ax.set_title(title)
-
-    fig.tight_layout()
-    fig.savefig('Cell_size_plot', dpi=300)
-    plt.close(fig)
 
 def ask_plane_interactively(points):
-    """
-    Interactively ask the user how they want to define the cutting plane.
-
-    Returns (axis, position, point, normal) in the same format expected
-    by build_plane(): either (axis, position, None, None) or
-    (None, None, point, normal).
-    """
+    """Ask the user how to define the cutting plane."""
     bmin = points.min(axis=0)
     bmax = points.max(axis=0)
     print("\nMesh bounding box:")
@@ -385,62 +290,246 @@ def ask_plane_interactively(points):
         idx = {"x": 0, "y": 1, "z": 2}[axis]
         default_pos = float((bmin[idx] + bmax[idx]) / 2.0)
         raw = input(f"Position along {axis} (default: {default_pos:.6g}, "
-                     f"range [{bmin[idx]:.6g}, {bmax[idx]:.6g}]): ").strip()
+                    f"range [{bmin[idx]:.6g}, {bmax[idx]:.6g}]): ").strip()
         position = float(raw) if raw else default_pos
         return axis, position, None, None
 
+    print("Enter the coordinates of a point on the plane (default: mesh center).")
+    center = (bmin + bmax) / 2.0
+    raw = input(f"Point [px py pz] (default: {center[0]:.6g} {center[1]:.6g} {center[2]:.6g}): ").strip()
+    if raw:
+        point = [float(v) for v in raw.split()]
+        if len(point) != 3:
+            raise ValueError("Expected 3 values for the point (px py pz).")
     else:
-        print("Enter the coordinates of a point on the plane (default: mesh center).")
-        center = (bmin + bmax) / 2.0
-        raw = input(f"Point [px py pz] (default: {center[0]:.6g} {center[1]:.6g} {center[2]:.6g}): ").strip()
-        if raw:
-            point = [float(v) for v in raw.split()]
-            if len(point) != 3:
-                raise ValueError("Expected 3 values for the point (px py pz).")
-        else:
-            point = list(center)
+        point = list(center)
 
-        while True:
-            raw = input("Normal vector [nx ny nz] (e.g. 0 0 1 for a horizontal plane): ").strip()
-            normal = [float(v) for v in raw.split()] if raw else None
-            if normal is not None and len(normal) == 3 and np.linalg.norm(normal) > 0:
-                break
-            print("Please enter 3 non-zero values, e.g. '1 0 0' or '1 1 0'.")
+    while True:
+        raw = input("Normal vector [nx ny nz] (e.g. 0 0 1 for a horizontal plane): ").strip()
+        normal = [float(v) for v in raw.split()] if raw else None
+        if normal is not None and len(normal) == 3 and np.linalg.norm(normal) > 0:
+            break
+        print("Please enter 3 non-zero values, e.g. '1 0 0' or '1 1 0'.")
 
-        return None, None, point, normal
+    return None, None, point, normal
+
+
+def ask_zoom_interactively(axis):
+    """
+    Ask the user whether to zoom on one or several predefined Z zones.
+    Only meaningful for x- or y-aligned planes, where Z is the vertical
+    plot axis. One image will be generated per selected zone.
+
+    Returns a list of zoom zones, where each entry is either a
+    (name, zmin, zmax) tuple, or None for "no zoom" (full range).
+    """
+    if axis not in ("x", "y"):
+        return [None]
+
+    print("\nZoom on specific Z zone(s)? (only relevant for x/y cutting planes)")
+    print("  0) No zoom (full Z range)")
+    for key, (name, zmin, zmax) in ZONES.items():
+        print(f"  {key}) {name}  (z in [{zmin}, {zmax}])")
+    print("You can select several at once, e.g. '0 1 2' or '1 3', separated by spaces.")
+    print("One output image will be generated per selection.")
+
+    while True:
+        raw = input("Enter choice(s) [0/1/2/3] (default: 0): ").strip() or "0"
+        tokens = raw.split()
+        if tokens and all(t in ("0", "1", "2", "3") for t in tokens):
+            break
+        print("Please enter one or more of 0, 1, 2, 3 separated by spaces.")
+
+    zones = []
+    seen = set()
+    for t in tokens:
+        if t in seen:
+            continue
+        seen.add(t)
+        zones.append(None if t == "0" else ZONES[t])
+
+    return zones
+
+
+def ask_colormap_interactively():
+    """Ask the user which colormap to use. Falls back to DEFAULT_CMAP."""
+    print("\nChoose a colormap for the cell-size visualization:")
+    for key, cmap in AVAILABLE_CMAPS.items():
+        print(f"  {key}) {cmap}")
+
+    max_attempts = 2
+    for attempt in range(max_attempts):
+        choice = input(f"Enter your choice (1-{len(AVAILABLE_CMAPS)}) "
+                       f"(default: {DEFAULT_CMAP}): ").strip()
+        if not choice:
+            return DEFAULT_CMAP
+        if choice in AVAILABLE_CMAPS:
+            return AVAILABLE_CMAPS[choice]
+        print(f"Invalid choice. Attempt {attempt + 1}/{max_attempts}")
+
+    return DEFAULT_CMAP
+
+
+"""
+# ===================================================================================================================
+#  Output naming
+# ===================================================================================================================
+"""
+
+
+def sanitize(value):
+    """Turn a number into a filename-safe token, e.g. -0.12 -> 'm0p12'."""
+    s = f"{value:.4g}"
+    return s.replace("-", "m").replace(".", "p")
+
+
+def build_basename(axis, position, point, normal, zone, cmap_name):
+    """Build an output file base name (no extension) from user choices."""
+    if axis is not None:
+        base = f"slice_{axis}{sanitize(position)}"
+    else:
+        base = (f"slice_oblique_pt{sanitize(point[0])}_{sanitize(point[1])}_{sanitize(point[2])}"
+                f"_n{sanitize(normal[0])}_{sanitize(normal[1])}_{sanitize(normal[2])}")
+
+    if zone is not None:
+        base += f"_{zone[0]}"
+
+    base += f"_{cmap_name}"
+    return base
+
+
+"""
+# ===================================================================================================================
+#  Plotting
+# ===================================================================================================================
+"""
+
+
+def plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
+               title=None, zoom_zone=None, tick_fontsize=16):
+    """Draw the cross-section as filled polygons and save PNG + colorbar PDF."""
+    if len(polygons) == 0:
+        raise RuntimeError(
+            "No cells found near the cutting plane. "
+            "Try increasing --tol or check the plane definition."
+        )
+
+    values = np.asarray(values)
+    values_safe = np.maximum(values, 1e-12)
+
+    norm = LogNorm(vmin=values_safe.min(), vmax=values_safe.max())
+
+    fig, ax = plt.subplots(figsize=(9, 8))
+
+    pc = PolyCollection(
+        polygons,
+        array=values,
+        cmap=cmap_name,
+        norm=norm,
+        edgecolors="black",
+        linewidths=0.1,
+    )
+    ax.add_collection(pc)
+
+    pts = np.vstack(polygons)
+    margin = 0.02 * (pts.max(axis=0) - pts.min(axis=0) + 1e-12)
+    ax.set_xlim(pts[:, 0].min() - margin[0], pts[:, 0].max() + margin[0])
+
+    if zoom_zone is not None:
+        _, zmin, zmax = zoom_zone
+        zmargin = 0.02 * (zmax - zmin)
+        ax.set_ylim(zmin - zmargin, zmax + zmargin)
+    else:
+        ax.set_ylim(pts[:, 1].min() - margin[1], pts[:, 1].max() + margin[1])
+
+    ax.set_aspect("equal")
+    ax.tick_params(axis="both", which="major", labelsize=tick_fontsize, length=7, width=1.2)
+
+    if title:
+        ax.set_title(title, fontsize=tick_fontsize + 2)
+
+    # ---- Colorbar on the main figure: plain (non power-of-10) tick labels ----
+    cbar = fig.colorbar(pc, ax=ax)
+    cbar.set_label("Cell size [mm]", fontsize=tick_fontsize)
+    cbar.ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
+    cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.3g}"))
+    cbar.ax.yaxis.set_minor_locator(NullLocator())
+    cbar.ax.yaxis.set_minor_formatter(NullFormatter())
+    cbar.ax.tick_params(labelsize=tick_fontsize)
+
+    fig.tight_layout()
+    fig.savefig(output_png, dpi=300)
+    plt.close(fig)
+    print(f"Saved cross-section image to '{output_png}'")
+
+    # ---- Separate figure containing only the colorbar, saved as PDF ----
+    mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap_name)
+    mappable.set_array(values)
+
+    fig_cb = plt.figure(figsize=(2.2, 8))
+    ax_cb = fig_cb.add_axes([0.35, 0.05, 0.25, 0.9])
+    cbar2 = fig_cb.colorbar(mappable, cax=ax_cb)
+    cbar2.set_label("Cell size [mm]", fontsize=tick_fontsize)
+    cbar2.ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
+    cbar2.ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.3g}"))
+    cbar2.ax.yaxis.set_minor_locator(NullLocator())
+    cbar2.ax.yaxis.set_minor_formatter(NullFormatter())
+    cbar2.ax.tick_params(labelsize=tick_fontsize)
+    if output_colorbar_pdf is not None:
+        fig_cb.savefig(output_colorbar_pdf)
+        plt.close(fig_cb)
+        print(f"Saved colorbar legend to '{output_colorbar_pdf}'")
+
+
+"""
+# ===================================================================================================================
+#  Command-line interface
+# ===================================================================================================================
+"""
 
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Slice a mesh from an HDF5 file and export a PNG colored by mesh size."
+        description="Slice a mesh from an HDF5 file and export a PNG colored by cell size."
     )
     p.add_argument("h5_file", help="Path to the input .h5 mesh file")
-    p.add_argument("-o", "--output", default="mesh_slice.png", help="Output PNG path")
+    p.add_argument("-o", "--output", default=None,
+                   help="Base name (no extension) for the output PNG/PDF. "
+                        "If omitted, a name is built automatically from your choices.")
 
     p.add_argument("--inspect", action="store_true",
-                    help="Print the HDF5 file structure and exit (use this to find dataset names)")
+                   help="Print the HDF5 file structure and exit")
 
-    p.add_argument("--points-key", default=None, help="Explicit HDF5 path to the points dataset")
-    p.add_argument("--cells-key", default=None, help="Explicit HDF5 path to the cells dataset")
+    p.add_argument("--points-key", default=None,
+                   help="HDF5 group containing x/y/z coordinate datasets (default: 'Coordinates')")
+    p.add_argument("--cells-key", default=None,
+                   help="HDF5 path to the flat tet connectivity dataset "
+                        "(default: 'Connectivity/tet->node')")
 
-    # Plane definition: either axis+position, or point+normal
     plane_group = p.add_argument_group("cutting plane (choose ONE method)")
-    plane_group.add_argument("--axis", choices=["x", "y", "z"], default=None,
-                              help="Axis-aligned plane, e.g. --axis z")
-    plane_group.add_argument("--position", type=float, default=0.0,
-                              help="Position along --axis (default: 0.0)")
-    plane_group.add_argument("--point", type=float, nargs=3, default=None,
-                              metavar=("PX", "PY", "PZ"),
-                              help="A point on the plane (for arbitrary plane)")
-    plane_group.add_argument("--normal", type=float, nargs=3, default=None,
-                              metavar=("NX", "NY", "NZ"),
-                              help="Plane normal vector (for arbitrary plane)")
+    plane_group.add_argument("--axis", choices=["x", "y", "z"], default=None)
+    plane_group.add_argument("--position", type=float, default=0.0)
+    plane_group.add_argument("--point", type=float, nargs=3, default=None, metavar=("PX", "PY", "PZ"))
+    plane_group.add_argument("--normal", type=float, nargs=3, default=None, metavar=("NX", "NY", "NZ"))
+
+    p.add_argument("--zone", choices=["none", "inlet", "flame", "comb"], default=None, nargs="+",
+                   help="One or more Z zoom zones for x/y-aligned planes, e.g. "
+                        "'--zone inlet flame'. Skips the interactive prompt. "
+                        "One output image is generated per zone.")
+    p.add_argument("--cmap", default=None, choices=list(AVAILABLE_CMAPS.values()),
+                   help="Colormap to use (skips the interactive prompt)")
 
     p.add_argument("--tol", type=float, default=None,
-                    help="Slab half-thickness around the plane used to select cells "
-                         "(default: auto = 1%% of the mesh bounding-box diagonal)")
+                   help="Slab half-thickness around the plane (default: 1%% of bbox diagonal)")
 
     return p.parse_args()
+
+
+"""
+# ===================================================================================================================
+#  MAIN Function
+# ===================================================================================================================
+"""
 
 
 def main():
@@ -460,13 +549,22 @@ def main():
     points, cells = load_mesh(args.h5_file, args.points_key, args.cells_key)
 
     if use_axis or use_point_normal:
-        # Plane fully specified on the command line
         axis, position, point, normal = args.axis, args.position, args.point, args.normal
     else:
-        # No plane given on the command line -> ask the user interactively
         axis, position, point, normal = ask_plane_interactively(points)
 
     plane_point, plane_normal, u_axis, v_axis = build_plane(axis, position, point, normal)
+
+    # ---- Colormap (asked first) ----
+    cmap_name = args.cmap or ask_colormap_interactively()
+
+    # ---- Optional Z zoom(s) (only offered for x/y-aligned planes) ----
+    if args.zone is not None:
+        zones = []
+        for z in dict.fromkeys(args.zone):  # de-duplicate, keep order
+            zones.append(None if z == "none" else ZONES[ZONE_CLI_MAP[z]])
+    else:
+        zones = ask_zoom_interactively(axis)
 
     if args.tol is None:
         bbox_diag = np.linalg.norm(points.max(axis=0) - points.min(axis=0))
@@ -475,15 +573,31 @@ def main():
         tol = args.tol
     print(f"Using slab half-thickness (tol) = {tol:.6g}")
 
-    segments, values = slice_mesh(points, cells, plane_point, plane_normal, tol,u_axis, v_axis)
-    print(f"Selected {len(segments)} edges for the cross-section")
+    polygons, values = slice_mesh(points, cells, plane_point, plane_normal, tol, u_axis, v_axis)
 
     if axis is not None:
-        title = f"Mesh cross-section at {axis} = {position}"
+        base_title = f"Mesh cross-section at {axis} "
     else:
-        title = f"Mesh cross-section (point={point}, normal={normal})"
+        base_title = f"Mesh cross-section (point={point}, normal={normal})"
+    Colormapspdf = True
+    for zone in zones:
+        
+        title = base_title if zone is None else f"{base_title}  [{zone[0]}]"
 
-    plot_slice(segments, values, args.output, title=title)
+        basename = args.output or build_basename(axis, position, point, normal, zone, cmap_name)
+        if args.output and len(zones) > 1:
+            # avoid overwriting the same file when several zones are requested
+            # together with an explicit --output base name
+            basename += "_full" if zone is None else f"_{zone[0]}"
+        output_png = f"{basename}.png"
+        if Colormapspdf is True:
+            output_colorbar_pdf = f"{basename}_colorbar.pdf"
+        else:
+            output_colorbar_pdf = None
+
+        plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
+                   title=title, zoom_zone=zone)
+        Colormapspdf = False
 
 
 if __name__ == "__main__":

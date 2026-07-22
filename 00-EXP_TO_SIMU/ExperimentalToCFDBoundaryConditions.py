@@ -270,15 +270,16 @@ def compute_HYLON_state(m_AIR, m_H2, m_NH3):
 def print_HYLON_state(state, PhiGlobal_ref=None, PhiCoflow_ref=None):
     m_AIR, m_H2, m_NH3 = state["m_AIR"], state["m_H2"], state["m_NH3"]
 
-    print("\n" + "=" * 45)
-    print("          MASS FLOW RATES")
-    print("=" * 45)
-    print(f"{'Species':<8} | {'mdot [g/s]':>12} | {'mdot [NL/min]':>15}")
-    print("-" * 45)
-    print(f"{'H2':<8} | {m_H2 * 1000:12.3f} | {Kg_TO_NormoLitre(m_H2, 'H2'):15.2f}")
-    print(f"{'NH3':<8} | {m_NH3 * 1000:12.3f} | {Kg_TO_NormoLitre(m_NH3, 'NH3'):15.2f}")
-    print(f"{'Air':<8} | {m_AIR * 1000:12.3f} | {Kg_TO_NormoLitre(m_AIR, 'air'):15.2f}")
-    print("=" * 45)
+    print("\n" + "=" * 70)
+    print("                         MASS FLOW RATES")
+    print("=" * 70)
+    print(f"{'Species':<8} | {'mdot [g/s]':>12} | {'mdot [kg/s]':>12} | {'mdot [NL/min]':>15}")
+    print("-" * 70)
+    print(f"{'H2':<8} | {m_H2 * 1000:12.3f} | {m_H2 :12.3e}| {Kg_TO_NormoLitre(m_H2, 'H2'):15.2f}")
+    print(f"{'NH3':<8} | {m_NH3 * 1000:12.3f} | {m_NH3 :12.3e}| {Kg_TO_NormoLitre(m_NH3, 'NH3'):15.2f}")
+    print(f"{'Air':<8} | {m_AIR * 1000:12.3f} | {m_AIR :12.3e}| {Kg_TO_NormoLitre(m_AIR, 'air'):15.2f}")
+    print(f"{'Air+ NH3':<8} | {(m_AIR +m_NH3) * 1000:12.3f} | {m_AIR + m_NH3 :12.3e}| {Kg_TO_NormoLitre(m_AIR, 'air')+Kg_TO_NormoLitre(m_NH3, 'NH3'):15.2f}")
+    print("=" * 70)
 
     print(f"\nFuel blend composition: {state['fuel_blend']}")
     ref_txt = f"  (exp reference: {PhiGlobal_ref})" if PhiGlobal_ref is not None else ""
@@ -286,11 +287,11 @@ def print_HYLON_state(state, PhiGlobal_ref=None, PhiCoflow_ref=None):
 
     print("\n--- MASS FRACTIONS - Central jet (H2) ---")
     for k, v in state["Y_jet"].items():
-        print(f"  * {k:<4} : {v:10.6f}")
+        print(f"  * {k:<4} : {v:10.4f}")
 
     print("\n--- MASS FRACTIONS - Coflow (NH3 + air) ---")
     for k, v in state["Y_coflow"].items():
-        print(f"  * {k:<4} : {v:10.6f}")
+        print(f"  * {k:<4} : {v:10.4f}")
 
     ref_txt = f"  (exp reference: {PhiCoflow_ref})" if PhiCoflow_ref is not None else ""
     print(f"\nComputed coflow equivalence ratio: {state['PhiCoflow']:.4f}{ref_txt}")
@@ -348,9 +349,9 @@ def __main__():
      print("########## CASE 1: Power / Equivalence ratio inputs (P, T, PhiGlobal, alpha_H2, Pth) ##########")
      state1 = Run_HYLON_Injection(
         "power",
-        Thermic_Power=8,     # kW
+        Thermic_Power=6,     # kW
         alpha_H2=0.7,
-        PhiGlobal=0.29,
+        PhiGlobal=0.5,
         PCI_H2=120,          # MJ/kg
         PCI_NH3=18.6,        # MJ/kg
         PhiCoflow=0.096,     # experimental reference value (optional, for comparison)
