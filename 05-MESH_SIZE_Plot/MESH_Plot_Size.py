@@ -82,7 +82,7 @@ from matplotlib.collections import PolyCollection
 
 # Predefined Z zoom zones (only meaningful for x- or y-aligned planes)
 ZONES = {
-    "1": ("INLET_SWIRLER", -0.115, 0.005),
+    "1": ("INLET_SWIRLER", -0.11, 0.01),
     "2": ("FLAME", -0.04, 0.05),
     "3": ("COMB_CHAMBER", -0.01, 0.14),
 }
@@ -94,7 +94,9 @@ AVAILABLE_CMAPS = {
     "3": "Blues_r",
     "4": "gray",
     "5": "cividis",
-    "6": "bwr",
+    "6": "BuGn_r",
+    "7": "RdPu_r",
+    "8": "BuPu_r"
 }
 DEFAULT_CMAP = "viridis"
 
@@ -221,37 +223,78 @@ def build_plane(axis, position, point, normal):
     return plane_point, plane_normal, u_axis, v_axis
 
 
-def slice_mesh(points, cells, plane_point, plane_normal, tol, u_axis, v_axis):
+def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis):
     """
-    Select cells whose centroid lies within `tol` of the cutting plane.
-    Vectorized over the (M, 4) cells array for performance on large meshes.
+    Compute the EXACT intersection of the cutting plane with each
+    tetrahedron (marching-tetrahedra style), instead of just projecting
+    whole cells that are merely close to the plane. This is essential
+    for correctly showing solid/void regions (e.g. a swirler insert):
+    a tetrahedron only produces a polygon where the plane truly crosses
+    it, so regions with no fluid mesh stay empty in the plot instead of
+    being artificially "filled in" by cells whose full body was simply
+    near the plane.
+
+    A plane cutting a tetrahedron yields either nothing, a single
+    triangle (1 vertex on one side, 3 on the other) or a quadrilateral
+    (2 vertices on each side) -- found by checking the 6 edges of the
+    tet for a sign change in the signed distance to the plane.
 
     Returns
     -------
-    polygons : list of (4, 2) arrays -> projected cell vertices, ready
-               for a PolyCollection
+    polygons : list of (3 or 4, 2) arrays -> exact projected intersection
+               polygons, ready for a PolyCollection
     values   : array of per-cell characteristic-size values (for coloring)
     """
-    cell_pts = points[cells]                      # (M, 4, 3)
-    centroids = cell_pts.mean(axis=1)              # (M, 3)
-    dist = (centroids - plane_point) @ plane_normal
-    mask = np.abs(dist) <= tol
+    EDGES = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
 
-    selected = cells[mask]
-    print(f"Selected {len(selected)} cells near the cutting plane")
+    cell_pts = points[cells]                                   # (M, 4, 3)
+    d = np.einsum("mij,j->mi", cell_pts - plane_point, plane_normal)  # (M, 4)
+
+    # Only keep cells that are actually crossed by the plane (vertices on both sides)
+    mask = np.any(d > 0, axis=1) & np.any(d < 0, axis=1)
+    selected_idx = np.nonzero(mask)[0]
+    print(f"Selected {len(selected_idx)} cells intersected by the cutting plane")
 
     p0u = plane_point @ u_axis
     p0v = plane_point @ v_axis
 
     polygons = []
-    values = np.empty(len(selected))
-    for n, cell in enumerate(selected):
+    values = []
+    for idx in selected_idx:
+        cell = cells[idx]
         verts = points[cell]
-        uv = np.column_stack((verts @ u_axis - p0u, verts @ v_axis - p0v))
-        polygons.append(uv)
-        values[n] = cell_characteristic_size(points, cell)
+        dd = d[idx]
 
-    return polygons, values
+        pts3d = []
+        for i, j in EDGES:
+            di, dj = dd[i], dd[j]
+            if di == 0.0 and dj == 0.0:
+                continue  # degenerate edge lying in the plane, ignored
+            if di * dj < 0.0:
+                t = di / (di - dj)
+                pts3d.append(verts[i] + t * (verts[j] - verts[i]))
+            elif di == 0.0:
+                pts3d.append(verts[i])
+            elif dj == 0.0:
+                pts3d.append(verts[j])
+
+        if len(pts3d) < 3:
+            continue  # touches the plane at a single point/edge only
+
+        pts3d = np.array(pts3d)
+        uv = np.column_stack((pts3d @ u_axis - p0u, pts3d @ v_axis - p0v))
+
+        # The intersection of a plane with a convex tetrahedron is itself
+        # convex, so sorting the projected points by angle around their
+        # centroid gives the correct (non self-intersecting) polygon order.
+        centroid = uv.mean(axis=0)
+        angles = np.arctan2(uv[:, 1] - centroid[1], uv[:, 0] - centroid[0])
+        uv = uv[np.argsort(angles)]
+
+        polygons.append(uv)
+        values.append(cell_characteristic_size(points, cell))
+
+    return polygons, np.array(values)
 
 
 """
@@ -406,18 +449,21 @@ def build_basename(axis, position, point, normal, zone, cmap_name):
 
 
 def plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
-               title=None, zoom_zone=None, tick_fontsize=16):
+               title=None, zoom_zone=None, tick_fontsize=14):
     """Draw the cross-section as filled polygons and save PNG + colorbar PDF."""
     if len(polygons) == 0:
         raise RuntimeError(
             "No cells found near the cutting plane. "
-            "Try increasing --tol or check the plane definition."
+            "Check that the plane actually passes through the mesh."
         )
-
     values = np.asarray(values)
     values_safe = np.maximum(values, 1e-12)
 
     norm = LogNorm(vmin=values_safe.min(), vmax=values_safe.max())
+
+    # Conversion m -> mm
+    polygons = [poly * 1e3 for poly in polygons]
+    pts = np.vstack(polygons)
 
     fig, ax = plt.subplots(figsize=(9, 8))
 
@@ -431,16 +477,15 @@ def plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
     )
     ax.add_collection(pc)
 
-    pts = np.vstack(polygons)
-    margin = 0.02 * (pts.max(axis=0) - pts.min(axis=0) + 1e-12)
-    ax.set_xlim(pts[:, 0].min() - margin[0], pts[:, 0].max() + margin[0])
-
     if zoom_zone is not None:
         _, zmin, zmax = zoom_zone
+        zmin *= 1e3
+        zmax *= 1e3
         zmargin = 0.02 * (zmax - zmin)
         ax.set_ylim(zmin - zmargin, zmax + zmargin)
-    else:
-        ax.set_ylim(pts[:, 1].min() - margin[1], pts[:, 1].max() + margin[1])
+
+    ax.set_xlabel(" [mm]", fontsize=tick_fontsize + 2)
+    ax.set_ylabel(" [mm]", fontsize=tick_fontsize + 2)
 
     ax.set_aspect("equal")
     ax.tick_params(axis="both", which="major", labelsize=tick_fontsize, length=7, width=1.2)
@@ -519,9 +564,6 @@ def parse_args():
     p.add_argument("--cmap", default=None, choices=list(AVAILABLE_CMAPS.values()),
                    help="Colormap to use (skips the interactive prompt)")
 
-    p.add_argument("--tol", type=float, default=None,
-                   help="Slab half-thickness around the plane (default: 1%% of bbox diagonal)")
-
     return p.parse_args()
 
 
@@ -566,38 +608,31 @@ def main():
     else:
         zones = ask_zoom_interactively(axis)
 
-    if args.tol is None:
-        bbox_diag = np.linalg.norm(points.max(axis=0) - points.min(axis=0))
-        tol = 0.01 * bbox_diag
-    else:
-        tol = args.tol
-    print(f"Using slab half-thickness (tol) = {tol:.6g}")
-
-    polygons, values = slice_mesh(points, cells, plane_point, plane_normal, tol, u_axis, v_axis)
+    polygons, values = slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis)
 
     if axis is not None:
         base_title = f"Mesh cross-section at {axis} "
     else:
         base_title = f"Mesh cross-section (point={point}, normal={normal})"
-    Colormapspdf = True
-    for zone in zones:
-        
-        title = base_title if zone is None else f"{base_title}  [{zone[0]}]"
 
+    PDF_colormaps = True
+    for zone in zones:
+        # title = base_title if zone is None else f"{base_title}  [{zone[0]}]"
+        title = None 
         basename = args.output or build_basename(axis, position, point, normal, zone, cmap_name)
         if args.output and len(zones) > 1:
             # avoid overwriting the same file when several zones are requested
             # together with an explicit --output base name
             basename += "_full" if zone is None else f"_{zone[0]}"
         output_png = f"{basename}.png"
-        if Colormapspdf is True:
+        if PDF_colormaps is True:
             output_colorbar_pdf = f"{basename}_colorbar.pdf"
+            PDF_colormaps = False
         else:
             output_colorbar_pdf = None
 
         plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
                    title=title, zoom_zone=zone)
-        Colormapspdf = False
 
 
 if __name__ == "__main__":
