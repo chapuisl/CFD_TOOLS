@@ -79,6 +79,11 @@ from matplotlib.collections import PolyCollection
 
 timings = {}
 
+#Description: Decorates a function to measure and record its execution time in the global timings dictionary.
+#
+#@func:   Function to time [callable]
+#
+#@return1: Wrapped function that times each call [callable]
 def timer(func):
     def wrapper(*args, **kwargs):
         t0 = time.perf_counter()
@@ -123,6 +128,11 @@ ZONE_CLI_MAP = {"inlet": "1", "flame": "2", "comb": "3", "none": None}
 # ===================================================================================================================
 """
 
+#Description: Prints the full structure (groups, datasets, shapes, dtypes) of an HDF5 file.
+#
+#@path:   Path to the HDF5 file to inspect [str]
+#
+#@return1: None, console output only [None]
 @timer
 def inspect_h5(path):
     """Print the full structure (groups, datasets, shapes) of the HDF5 file."""
@@ -137,6 +147,14 @@ def inspect_h5(path):
     with h5py.File(path, "r") as f:
         f.visititems(visitor)
 
+#Description: Loads node coordinates and tetrahedral connectivity from the HDF5 file.
+#
+#@path:        Path to the input HDF5 file [str]
+#@points_key:  Name of the HDF5 group containing x/y/z, default "Coordinates" [str]
+#@cells_key:   Path to the tet->node connectivity dataset, default "Connectivity/tet->node" [str]
+#
+#@return1: Mesh node coordinates [m]
+#@return2: Tetrahedra connectivity, 0-based node indices [-]
 @timer
 def load_mesh(path, points_key=None, cells_key=None):
     """
@@ -174,12 +192,24 @@ def load_mesh(path, points_key=None, cells_key=None):
 # ===================================================================================================================
 """
 
+#Description: Computes the volume of a tetrahedral cell from its 4 vertices.
+#
+#@points:  Array of coordinates of all mesh nodes [m]
+#@cell:    Indices of the 4 nodes forming the tetrahedron [-]
+#
+#@return1: Volume of the tetrahedron [m3]
 @timer
 def tetra_volume(points, cell):
     """Volume of a tetrahedral cell."""
     a, b, c, d = points[cell[:4]]
     return abs(np.linalg.det(np.column_stack((b - a, c - a, d - a)))) / 6.0
 
+#Description: Computes the equivalent diameter of a tetrahedral cell (diameter of the sphere with the same volume).
+#
+#@points:  Array of coordinates of all mesh nodes [m]
+#@cell:    Indices of the 4 nodes forming the tetrahedron [-]
+#
+#@return1: Characteristic size of the cell [mm]
 @timer
 def cell_characteristic_size(points, cell):
     """
@@ -198,6 +228,17 @@ def cell_characteristic_size(points, cell):
 # ===================================================================================================================
 """
 
+#Description: Builds the reference point, normal, and local axes (u,v) of the cutting plane from user input.
+#
+#@axis:      Cutting axis for an axis-aligned plane, "x"/"y"/"z" or None [-]
+#@position:  Position of the plane along the axis, for an axis-aligned plane [m]
+#@point:     Point on the plane, for an arbitrary plane [m]
+#@normal:    Normal vector of the plane, for an arbitrary plane [-]
+#
+#@return1: Reference point of the cutting plane [m]
+#@return2: Unit normal vector of the cutting plane [-]
+#@return3: First local axis of the plane, horizontal on the plot [-]
+#@return4: Second local axis of the plane, vertical on the plot [-]
 @timer
 def build_plane(axis, position, point, normal):
     """
@@ -237,7 +278,19 @@ def build_plane(axis, position, point, normal):
     return plane_point, plane_normal, u_axis, v_axis
 
 EDGES = np.array([(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)])
- 
+
+#Description: Computes the exact intersection of the cutting plane with each tetrahedron of the mesh (triangle or quadrilateral depending on the case), fully vectorized and processed in chunks to control memory usage on large meshes.
+#
+#@points:        Array of coordinates of all mesh nodes [m]
+#@cells:         Tetrahedra connectivity, node indices [-]
+#@plane_point:   Reference point of the cutting plane [m]
+#@plane_normal:  Unit normal vector of the cutting plane [-]
+#@u_axis:        First local axis of the cutting plane [-]
+#@v_axis:        Second local axis of the cutting plane [-]
+#@chunk_size:    Number of tetrahedra processed per chunk [-]
+#
+#@return1: List of 2D intersection polygons, triangles or quadrilaterals [m]
+#@return2: Characteristic size associated with each polygon [mm]
 @timer
 def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis,
                      chunk_size=5_000_000):
@@ -335,6 +388,14 @@ def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis,
 # ===================================================================================================================
 """
 
+#Description: Interactively asks the user to define the cutting plane, axis-aligned or point+normal.
+#
+#@points:  Array of coordinates of all mesh nodes, used to display the bounding box [m]
+#
+#@return1: Cutting axis if axis-aligned plane, otherwise None [-]
+#@return2: Position along the axis if axis-aligned plane, otherwise None [m]
+#@return3: Point on the plane if arbitrary plane, otherwise None [m]
+#@return4: Normal vector if arbitrary plane, otherwise None [-]
 @timer
 def ask_plane_interactively(points):
     """Ask the user how to define the cutting plane."""
@@ -388,6 +449,11 @@ def ask_plane_interactively(points):
 
     return None, None, point, normal
 
+#Description: Interactively asks the user to choose one or several predefined Z zoom zones.
+#
+#@axis:  Current cutting-plane axis, "x", "y" or "z" [-]
+#
+#@return1: List of chosen zoom zones, each element being (name, zmin, zmax) or None [m]
 @timer
 def ask_zoom_interactively(axis):
     """
@@ -425,6 +491,9 @@ def ask_zoom_interactively(axis):
 
     return zones
 
+#Description: Interactively asks the user to choose a colormap among the available ones, falling back to the default value.
+#
+#@return1: Name of the chosen colormap [-]
 @timer
 def ask_colormap_interactively():
     """Ask the user which colormap to use. Falls back to DEFAULT_CMAP."""
@@ -451,12 +520,27 @@ def ask_colormap_interactively():
 # ===================================================================================================================
 """
 
+#Description: Converts a numeric value into a filename-safe token.
+#
+#@value:  Numeric value to convert [-]
+#
+#@return1: Filename-safe string [-]
 @timer
 def sanitize(value):
     """Turn a number into a filename-safe token, e.g. -0.12 -> 'm0p12'."""
     s = f"{value:.4g}"
     return s.replace("-", "m").replace(".", "p")
 
+#Description: Builds the output files' base name, without extension, from the user's choices.
+#
+#@axis:       Cutting axis if axis-aligned plane, otherwise None [-]
+#@position:   Position along the axis if axis-aligned plane [m]
+#@point:      Point on the plane if arbitrary plane [m]
+#@normal:     Normal vector if arbitrary plane [-]
+#@zone:       Chosen zoom zone (name, zmin, zmax), or None [-]
+#@cmap_name:  Name of the colormap used [-]
+#
+#@return1: Base name of the output files [-]
 @timer
 def build_basename(axis, position, point, normal, zone, cmap_name):
     """Build an output file base name (no extension) from user choices."""
@@ -478,6 +562,22 @@ def build_basename(axis, position, point, normal, zone, cmap_name):
 #  Plotting
 # ===================================================================================================================
 """
+
+#Description: Plots the mesh cross-section as polygons colored by cell size, then saves the main figure (PNG/PDF) and the colorbar legend (PDF).
+#
+#@polygons:             List of 2D intersection polygons to plot [m]
+#@values:               Characteristic size associated with each polygon [mm]
+#@cmap_name:            Name of the colormap to use [-]
+#@output_basename:      Base name, without extension, of the output file [-]
+#@output_format:        Export format of the main figure, "png" or "pdf" [-]
+#@output_colorbar_pdf:  Path to the colorbar PDF file, None to skip it [-]
+#@title:                Optional plot title [-]
+#@zoom_zone:            Optional zoom zone (name, zmin, zmax) [m]
+#@tick_fontsize:        Tick label font size [pt]
+#@edge_linewidth:       Cell outline width, 0 to disable it [pt]
+#@dpi:                  Resolution of the exported raster image [dpi]
+#
+#@return1: None, PNG/PDF files written to disk [None]
 @timer
 def plot_slice(polygons, values, cmap_name, output_basename,
                      output_format="png", output_colorbar_pdf=None,
@@ -516,7 +616,7 @@ def plot_slice(polygons, values, cmap_name, output_basename,
         norm=norm,
         edgecolors="black" if edge_linewidth > 0 else "none",
         linewidths=edge_linewidth,
-        rasterized=True,   # <-- cle pour la vitesse, en PNG comme en PDF
+        rasterized=True,   
     )
     ax.add_collection(pc)
  
@@ -575,6 +675,9 @@ def plot_slice(polygons, values, cmap_name, output_basename,
 # ===================================================================================================================
 """
 
+#Description: Defines and parses the script's command-line arguments.
+#
+#@return1: Object holding all parsed arguments [Namespace]
 @timer
 def parse_args():
     p = argparse.ArgumentParser(
@@ -616,6 +719,9 @@ def parse_args():
 # ===================================================================================================================
 """
 
+#Description: Main function orchestrating mesh loading, cutting-plane definition, slice computation, and figure export for each requested zone.
+#
+#@return1: None, side effects: files written to disk and console output [None]
 @timer
 def main():
     args = parse_args()
