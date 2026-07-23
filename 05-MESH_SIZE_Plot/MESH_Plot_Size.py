@@ -56,7 +56,9 @@
 # ===================================================================================================================
 """
 import argparse
+import time
 import sys
+
 
 """
 # ===================================================================================================================
@@ -73,6 +75,17 @@ from matplotlib.colors import LogNorm
 from matplotlib.ticker import LogLocator, FuncFormatter, NullLocator, NullFormatter
 from matplotlib.collections import PolyCollection
 
+
+
+timings = {}
+
+def timer(func):
+    def wrapper(*args, **kwargs):
+        t0 = time.perf_counter()
+        result = func(*args, **kwargs)
+        timings[func.__name__] = time.perf_counter() - t0
+        return result
+    return wrapper
 
 """
 # ===================================================================================================================
@@ -110,7 +123,7 @@ ZONE_CLI_MAP = {"inlet": "1", "flame": "2", "comb": "3", "none": None}
 # ===================================================================================================================
 """
 
-
+@timer
 def inspect_h5(path):
     """Print the full structure (groups, datasets, shapes) of the HDF5 file."""
     print(f"Structure of '{path}':")
@@ -124,7 +137,7 @@ def inspect_h5(path):
     with h5py.File(path, "r") as f:
         f.visititems(visitor)
 
-
+@timer
 def load_mesh(path, points_key=None, cells_key=None):
     """
     Load node coordinates and tetrahedral connectivity from the HDF5 file.
@@ -161,21 +174,22 @@ def load_mesh(path, points_key=None, cells_key=None):
 # ===================================================================================================================
 """
 
-
+@timer
 def tetra_volume(points, cell):
     """Volume of a tetrahedral cell."""
     a, b, c, d = points[cell[:4]]
     return abs(np.linalg.det(np.column_stack((b - a, c - a, d - a)))) / 6.0
 
-
+@timer
 def cell_characteristic_size(points, cell):
     """
     Equivalent diameter based on tetrahedron volume.
     h = diameter of the sphere with the same volume, in mm
     (assumes mesh coordinates are in meters).
     """
-    V = tetra_volume(points, cell)
-    return float(2.0 * (3.0 * V / (4.0 * np.pi)) ** (1.0 / 3.0) * 1e3)
+    V = tetra_volume(points, cell)   # m³
+    h = (6.0 * np.sqrt(2.0) * V) ** (1.0 / 3.0)
+    return h * 1e3
 
 
 """
@@ -184,7 +198,7 @@ def cell_characteristic_size(points, cell):
 # ===================================================================================================================
 """
 
-
+@timer
 def build_plane(axis, position, point, normal):
     """
     Build (plane_point, plane_normal, u_axis, v_axis) from user input.
@@ -222,79 +236,97 @@ def build_plane(axis, position, point, normal):
 
     return plane_point, plane_normal, u_axis, v_axis
 
-
-def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis):
+EDGES = np.array([(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)])
+ 
+@timer
+def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis,
+                     chunk_size=5_000_000):
     """
-    Compute the EXACT intersection of the cutting plane with each
-    tetrahedron (marching-tetrahedra style), instead of just projecting
-    whole cells that are merely close to the plane. This is essential
-    for correctly showing solid/void regions (e.g. a swirler insert):
-    a tetrahedron only produces a polygon where the plane truly crosses
-    it, so regions with no fluid mesh stay empty in the plot instead of
-    being artificially "filled in" by cells whose full body was simply
-    near the plane.
-
-    A plane cutting a tetrahedron yields either nothing, a single
-    triangle (1 vertex on one side, 3 on the other) or a quadrilateral
-    (2 vertices on each side) -- found by checking the 6 edges of the
-    tet for a sign change in the signed distance to the plane.
-
-    Returns
-    -------
-    polygons : list of (3 or 4, 2) arrays -> exact projected intersection
-               polygons, ready for a PolyCollection
-    values   : array of per-cell characteristic-size values (for coloring)
+    Meme resultat que slice_mesh() (liste de polygones 2D + valeurs de
+    taille de maille), mais sans boucle Python par cellule.
+ 
+    chunk_size : nombre de tetraedres traites a la fois. Permet de
+    controler la memoire sur un maillage de 200M+ cellules
+    (ex: 5M cellules par chunk = quelques centaines de Mo de temporaires).
     """
-    EDGES = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
-
-    cell_pts = points[cells]                                   # (M, 4, 3)
-    d = np.einsum("mij,j->mi", cell_pts - plane_point, plane_normal)  # (M, 4)
-
-    # Only keep cells that are actually crossed by the plane (vertices on both sides)
-    mask = np.any(d > 0, axis=1) & np.any(d < 0, axis=1)
-    selected_idx = np.nonzero(mask)[0]
-    print(f"Selected {len(selected_idx)} cells intersected by the cutting plane")
-
     p0u = plane_point @ u_axis
     p0v = plane_point @ v_axis
+ 
+    # Distance signee au plan calculee UNE FOIS par noeud (N valeurs),
+    # au lieu de la recalculer pour chaque cellule via un gather (M,4,3).
+    # C'est 3x moins de memoire et beaucoup moins de calcul que
+    # l'einsum sur les coordonnees completes.
+    d_nodes = (points - plane_point) @ plane_normal
+ 
+    all_polygons = []
+    all_values = []
+    n_cells = cells.shape[0]
+    n_selected_total = 0
+ 
+    for start in range(0, n_cells, chunk_size):
+        chunk = cells[start:start + chunk_size]
+        d = d_nodes[chunk]  # (m,4) -- gather bon marche (float, pas (x,y,z))
+ 
+        mask = np.any(d > 0, axis=1) & np.any(d < 0, axis=1)
+        sel = chunk[mask]
+        dsel = d[mask]
+        if len(sel) == 0:
+            continue
+        n_selected_total += len(sel)
+ 
+        di = dsel[:, EDGES[:, 0]]      # (m,6) distance aux 2 extremites
+        dj = dsel[:, EDGES[:, 1]]      # de chacune des 6 aretes
+        crossed = di * dj < 0.0        # (m,6) arete reellement coupee
+ 
+        n_crossed = crossed.sum(axis=1)
+ 
+        # On traite separement le cas triangle (3 aretes coupees) et
+        # le cas quadrilatere (4 aretes coupees), car ce sont deux
+        # formes de tableau differentes (k,3,..) vs (k,4,..).
+        for is_case, n_pts in ((n_crossed == 3, 3), (n_crossed == 4, 4)):
+            idx = np.nonzero(is_case)[0]
+            if len(idx) == 0:
+                continue
+ 
+            sub_cells = sel[idx]                 # (k,4)
+            sub_crossed = crossed[idx]            # (k,6) bool, exactement n_pts True/ligne
+            sub_di, sub_dj = di[idx], dj[idx]     # (k,6)
+ 
+            verts = points[sub_cells]             # (k,4,3)
+            vi = verts[:, EDGES[:, 0]]            # (k,6,3)
+            vj = verts[:, EDGES[:, 1]]
+            t = (sub_di / (sub_di - sub_dj))[..., None]   # (k,6,1)
+            pts3d_all = vi + t * (vj - vi)                 # (k,6,3) point sur chaque arete
+ 
+            # Ne garder que les n_pts aretes reellement coupees par ligne,
+            # reshape en tableau fixe (k, n_pts, 3) -> plus de boucle Python.
+            row_idx, col_idx = np.nonzero(sub_crossed)
+            pts3d = pts3d_all[row_idx, col_idx].reshape(-1, n_pts, 3)
+ 
+            # Projection dans le plan de coupe (coord. u,v)
+            uv = np.stack([pts3d @ u_axis - p0u,
+                            pts3d @ v_axis - p0v], axis=-1)  # (k,n_pts,2)
+ 
+            # Tri angulaire autour du centroide -> polygone convexe non
+            # auto-intersectant. Vectorise car n_pts est fixe (3 ou 4).
+            centroid = uv.mean(axis=1, keepdims=True)
+            angles = np.arctan2(uv[..., 1] - centroid[..., 1],
+                                 uv[..., 0] - centroid[..., 0])
+            order = np.argsort(angles, axis=1)
+            uv_sorted = np.take_along_axis(uv, order[..., None], axis=1)
+ 
+            # Volume et taille caracteristique, vectorises sur les 4 sommets
+            a, b, c, d_ = verts[:, 0], verts[:, 1], verts[:, 2], verts[:, 3]
+            vol = np.abs(np.linalg.det(
+                np.stack([b - a, c - a, d_ - a], axis=1))) / 6.0
+            h_mm = (6.0 * np.sqrt(2.0) * vol) ** (1.0 / 3.0) * 1e3
+ 
+            all_polygons.extend(uv_sorted)  # list d'arrays (n_pts,2), attendu par PolyCollection
+            all_values.extend(h_mm)
+ 
+    print(f"Selected {n_selected_total} cells intersected by the cutting plane")
+    return all_polygons, np.array(all_values)
 
-    polygons = []
-    values = []
-    for idx in selected_idx:
-        cell = cells[idx]
-        verts = points[cell]
-        dd = d[idx]
-
-        pts3d = []
-        for i, j in EDGES:
-            di, dj = dd[i], dd[j]
-            if di == 0.0 and dj == 0.0:
-                continue  # degenerate edge lying in the plane, ignored
-            if di * dj < 0.0:
-                t = di / (di - dj)
-                pts3d.append(verts[i] + t * (verts[j] - verts[i]))
-            elif di == 0.0:
-                pts3d.append(verts[i])
-            elif dj == 0.0:
-                pts3d.append(verts[j])
-
-        if len(pts3d) < 3:
-            continue  # touches the plane at a single point/edge only
-
-        pts3d = np.array(pts3d)
-        uv = np.column_stack((pts3d @ u_axis - p0u, pts3d @ v_axis - p0v))
-
-        # The intersection of a plane with a convex tetrahedron is itself
-        # convex, so sorting the projected points by angle around their
-        # centroid gives the correct (non self-intersecting) polygon order.
-        centroid = uv.mean(axis=0)
-        angles = np.arctan2(uv[:, 1] - centroid[1], uv[:, 0] - centroid[0])
-        uv = uv[np.argsort(angles)]
-
-        polygons.append(uv)
-        values.append(cell_characteristic_size(points, cell))
-
-    return polygons, np.array(values)
 
 
 """
@@ -303,7 +335,7 @@ def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis):
 # ===================================================================================================================
 """
 
-
+@timer
 def ask_plane_interactively(points):
     """Ask the user how to define the cutting plane."""
     bmin = points.min(axis=0)
@@ -356,7 +388,7 @@ def ask_plane_interactively(points):
 
     return None, None, point, normal
 
-
+@timer
 def ask_zoom_interactively(axis):
     """
     Ask the user whether to zoom on one or several predefined Z zones.
@@ -393,7 +425,7 @@ def ask_zoom_interactively(axis):
 
     return zones
 
-
+@timer
 def ask_colormap_interactively():
     """Ask the user which colormap to use. Falls back to DEFAULT_CMAP."""
     print("\nChoose a colormap for the cell-size visualization:")
@@ -419,13 +451,13 @@ def ask_colormap_interactively():
 # ===================================================================================================================
 """
 
-
+@timer
 def sanitize(value):
     """Turn a number into a filename-safe token, e.g. -0.12 -> 'm0p12'."""
     s = f"{value:.4g}"
     return s.replace("-", "m").replace(".", "p")
 
-
+@timer
 def build_basename(axis, position, point, normal, zone, cmap_name):
     """Build an output file base name (no extension) from user choices."""
     if axis is not None:
@@ -446,11 +478,23 @@ def build_basename(axis, position, point, normal, zone, cmap_name):
 #  Plotting
 # ===================================================================================================================
 """
-
-
-def plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
-               title=None, zoom_zone=None, tick_fontsize=14):
-    """Draw the cross-section as filled polygons and save PNG + colorbar PDF."""
+@timer
+def plot_slice(polygons, values, cmap_name, output_basename,
+                     output_format="png", output_colorbar_pdf=None,
+                     title=None, zoom_zone=None, tick_fontsize=14,
+                     edge_linewidth=0.05, dpi=400):
+    """
+    Parameters
+    ----------
+    output_basename : str
+        Nom de fichier SANS extension, ex "slice_z0p5_viridis".
+    output_format : "png" | "pdf" | "both"
+        Format(s) de sortie pour la figure principale.
+    edge_linewidth : float
+        Epaisseur du contour des mailles. Mettre 0.0 pour le desactiver
+        completement (gain de vitesse notable si tu as beaucoup de
+        polygones et que le contour n'est pas indispensable).
+    """
     if len(polygons) == 0:
         raise RuntimeError(
             "No cells found near the cutting plane. "
@@ -458,42 +502,41 @@ def plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
         )
     values = np.asarray(values)
     values_safe = np.maximum(values, 1e-12)
-
     norm = LogNorm(vmin=values_safe.min(), vmax=values_safe.max())
-
+ 
     # Conversion m -> mm
-    polygons = [poly * 1e3 for poly in polygons]
-    pts = np.vstack(polygons)
-
+    polygons_mm = [poly * 1e3 for poly in polygons]
+ 
     fig, ax = plt.subplots(figsize=(9, 8))
-
+ 
     pc = PolyCollection(
-        polygons,
+        polygons_mm,
         array=values,
         cmap=cmap_name,
         norm=norm,
-        edgecolors="black",
-        linewidths=0.1,
+        edgecolors="black" if edge_linewidth > 0 else "none",
+        linewidths=edge_linewidth,
+        rasterized=True,   # <-- cle pour la vitesse, en PNG comme en PDF
     )
     ax.add_collection(pc)
-
+ 
     if zoom_zone is not None:
         _, zmin, zmax = zoom_zone
         zmin *= 1e3
         zmax *= 1e3
         zmargin = 0.02 * (zmax - zmin)
         ax.set_ylim(zmin - zmargin, zmax + zmargin)
-
+    else:
+        ax.autoscale_view()
+ 
     ax.set_xlabel(" [mm]", fontsize=tick_fontsize + 2)
     ax.set_ylabel(" [mm]", fontsize=tick_fontsize + 2)
-
     ax.set_aspect("equal")
     ax.tick_params(axis="both", which="major", labelsize=tick_fontsize, length=7, width=1.2)
-
+ 
     if title:
         ax.set_title(title, fontsize=tick_fontsize + 2)
-
-    # ---- Colorbar on the main figure: plain (non power-of-10) tick labels ----
+ 
     cbar = fig.colorbar(pc, ax=ax)
     cbar.set_label("Cell size [mm]", fontsize=tick_fontsize)
     cbar.ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
@@ -501,13 +544,14 @@ def plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
     cbar.ax.yaxis.set_minor_locator(NullLocator())
     cbar.ax.yaxis.set_minor_formatter(NullFormatter())
     cbar.ax.tick_params(labelsize=tick_fontsize)
-
+ 
     fig.tight_layout()
-    fig.savefig(output_png, dpi=300)
+    output_png = f"{output_basename}.{output_format}"
+    fig.savefig(output_png, dpi=dpi)
     plt.close(fig)
     print(f"Saved cross-section image to '{output_png}'")
-
-    # ---- Separate figure containing only the colorbar, saved as PDF ----
+ 
+    # ---- Colorbar seule, en PDF (deja leger car pas de polygones) ----
     mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap_name)
     mappable.set_array(values)
 
@@ -525,14 +569,13 @@ def plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
         plt.close(fig_cb)
         print(f"Saved colorbar legend to '{output_colorbar_pdf}'")
 
-
 """
 # ===================================================================================================================
 #  Command-line interface
 # ===================================================================================================================
 """
 
-
+@timer
 def parse_args():
     p = argparse.ArgumentParser(
         description="Slice a mesh from an HDF5 file and export a PNG colored by cell size."
@@ -573,7 +616,7 @@ def parse_args():
 # ===================================================================================================================
 """
 
-
+@timer
 def main():
     args = parse_args()
 
@@ -631,9 +674,11 @@ def main():
         else:
             output_colorbar_pdf = None
 
-        plot_slice(polygons, values, cmap_name, output_png, output_colorbar_pdf,
-                   title=title, zoom_zone=zone)
+        plot_slice(polygons, values, cmap_name, basename, output_format="png", output_colorbar_pdf=output_colorbar_pdf, title=title, zoom_zone=zone)
+        
 
 
 if __name__ == "__main__":
     main()
+    for name, t in sorted(timings.items(), key=lambda x: x[1], reverse=True):
+        print(f"{name:20s}: {t:.3f} s")
