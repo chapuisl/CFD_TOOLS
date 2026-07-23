@@ -105,6 +105,9 @@ ZONES = {
     "3": ("COMB_CHAMBER", -0.01, 0.14),
 }
 
+# Maps the --zone CLI argument to the corresponding ZONES key
+ZONE_CLI_MAP = {"inlet": "1", "flame": "2", "comb": "3", "none": None}
+
 # Available colormaps to choose from interactively
 AVAILABLE_CMAPS = {
     "1": "viridis",
@@ -118,8 +121,6 @@ AVAILABLE_CMAPS = {
 }
 DEFAULT_CMAP = "viridis"
 
-# Maps the --zone CLI argument to the corresponding ZONES key
-ZONE_CLI_MAP = {"inlet": "1", "flame": "2", "comb": "3", "none": None}
 
 
 """
@@ -157,14 +158,7 @@ def inspect_h5(path):
 #@return2: Tetrahedra connectivity, 0-based node indices [-]
 @timer
 def load_mesh(path, points_key=None, cells_key=None):
-    """
-    Load node coordinates and tetrahedral connectivity from the HDF5 file.
-
-    Returns
-    -------
-    points : (N, 3) float array
-    cells  : (M, 4) int array of node indices (0-based), one row per tet
-    """
+    
     points_group = points_key or "Coordinates"
     px = f"{points_group}/x"
     py = f"{points_group}/y"
@@ -214,8 +208,6 @@ def tetra_volume(points, cell):
 def cell_characteristic_size(points, cell):
     """
     Equivalent diameter based on tetrahedron volume.
-    h = diameter of the sphere with the same volume, in mm
-    (assumes mesh coordinates are in meters).
     """
     V = tetra_volume(points, cell)   # m³
     h = (6.0 * np.sqrt(2.0) * V) ** (1.0 / 3.0)
@@ -294,14 +286,7 @@ EDGES = np.array([(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)])
 @timer
 def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis,
                      chunk_size=5_000_000):
-    """
-    Meme resultat que slice_mesh() (liste de polygones 2D + valeurs de
-    taille de maille), mais sans boucle Python par cellule.
- 
-    chunk_size : nombre de tetraedres traites a la fois. Permet de
-    controler la memoire sur un maillage de 200M+ cellules
-    (ex: 5M cellules par chunk = quelques centaines de Mo de temporaires).
-    """
+    
     p0u = plane_point @ u_axis
     p0v = plane_point @ v_axis
  
@@ -334,8 +319,7 @@ def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis,
         n_crossed = crossed.sum(axis=1)
  
         # On traite separement le cas triangle (3 aretes coupees) et
-        # le cas quadrilatere (4 aretes coupees), car ce sont deux
-        # formes de tableau differentes (k,3,..) vs (k,4,..).
+        # le cas quadrilatere (4 aretes coupees), 
         for is_case, n_pts in ((n_crossed == 3, 3), (n_crossed == 4, 4)):
             idx = np.nonzero(is_case)[0]
             if len(idx) == 0:
@@ -352,7 +336,7 @@ def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis,
             pts3d_all = vi + t * (vj - vi)                 # (k,6,3) point sur chaque arete
  
             # Ne garder que les n_pts aretes reellement coupees par ligne,
-            # reshape en tableau fixe (k, n_pts, 3) -> plus de boucle Python.
+            # reshape en tableau fixe (k, n_pts, 3) 
             row_idx, col_idx = np.nonzero(sub_crossed)
             pts3d = pts3d_all[row_idx, col_idx].reshape(-1, n_pts, 3)
  
@@ -360,7 +344,7 @@ def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis,
             uv = np.stack([pts3d @ u_axis - p0u,
                             pts3d @ v_axis - p0v], axis=-1)  # (k,n_pts,2)
  
-            # Tri angulaire autour du centroide -> polygone convexe non
+            # Tri angulaire autour du centroide polygone convexe non
             # auto-intersectant. Vectorise car n_pts est fixe (3 ou 4).
             centroid = uv.mean(axis=1, keepdims=True)
             angles = np.arctan2(uv[..., 1] - centroid[..., 1],
@@ -398,7 +382,6 @@ def slice_mesh(points, cells, plane_point, plane_normal, u_axis, v_axis,
 #@return4: Normal vector if arbitrary plane, otherwise None [-]
 @timer
 def ask_plane_interactively(points):
-    """Ask the user how to define the cutting plane."""
     bmin = points.min(axis=0)
     bmax = points.max(axis=0)
     print("\nMesh bounding box:")
@@ -456,14 +439,6 @@ def ask_plane_interactively(points):
 #@return1: List of chosen zoom zones, each element being (name, zmin, zmax) or None [m]
 @timer
 def ask_zoom_interactively(axis):
-    """
-    Ask the user whether to zoom on one or several predefined Z zones.
-    Only meaningful for x- or y-aligned planes, where Z is the vertical
-    plot axis. One image will be generated per selected zone.
-
-    Returns a list of zoom zones, where each entry is either a
-    (name, zmin, zmax) tuple, or None for "no zoom" (full range).
-    """
     if axis not in ("x", "y"):
         return [None]
 
@@ -496,7 +471,6 @@ def ask_zoom_interactively(axis):
 #@return1: Name of the chosen colormap [-]
 @timer
 def ask_colormap_interactively():
-    """Ask the user which colormap to use. Falls back to DEFAULT_CMAP."""
     print("\nChoose a colormap for the cell-size visualization:")
     for key, cmap in AVAILABLE_CMAPS.items():
         print(f"  {key}) {cmap}")
@@ -527,7 +501,6 @@ def ask_colormap_interactively():
 #@return1: Filename-safe string [-]
 @timer
 def sanitize(value):
-    """Turn a number into a filename-safe token, e.g. -0.12 -> 'm0p12'."""
     s = f"{value:.4g}"
     return s.replace("-", "m").replace(".", "p")
 
@@ -543,7 +516,6 @@ def sanitize(value):
 #@return1: Base name of the output files [-]
 @timer
 def build_basename(axis, position, point, normal, zone, cmap_name):
-    """Build an output file base name (no extension) from user choices."""
     if axis is not None:
         base = f"slice_{axis}{sanitize(position)}"
     else:
@@ -583,18 +555,6 @@ def plot_slice(polygons, values, cmap_name, output_basename,
                      output_format="png", output_colorbar_pdf=None,
                      title=None, zoom_zone=None, tick_fontsize=14,
                      edge_linewidth=0.05, dpi=400):
-    """
-    Parameters
-    ----------
-    output_basename : str
-        Nom de fichier SANS extension, ex "slice_z0p5_viridis".
-    output_format : "png" | "pdf" | "both"
-        Format(s) de sortie pour la figure principale.
-    edge_linewidth : float
-        Epaisseur du contour des mailles. Mettre 0.0 pour le desactiver
-        completement (gain de vitesse notable si tu as beaucoup de
-        polygones et que le contour n'est pas indispensable).
-    """
     if len(polygons) == 0:
         raise RuntimeError(
             "No cells found near the cutting plane. "
