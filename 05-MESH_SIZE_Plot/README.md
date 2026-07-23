@@ -191,31 +191,7 @@ The intersection points are sorted by angle around their centroid (the intersect
 
 ## Performance on large meshes
 
-On meshes with tens to hundreds of millions of tetrahedra, two optimized versions are provided in this repository:
-
-- **`slice_mesh_fast.py`** — replaces the per-cell Python loop in `slice_mesh()` with fully vectorized NumPy operations (batched processing of the triangle and quadrilateral cases). Typical speedup: x20 to x100.
-- **`plot_slice_fast.py`** — replaces `plot_slice()`: rendering uses `rasterized=True` so the save time and file size no longer depend on the number of polygons, with output format selectable via `output_format="png" | "pdf" | "both"`.
-
-Other recommendations for very large meshes:
-
-- Load `points` as `float32` and `cells` as `int32` (instead of `float64`/`int64`) to roughly halve memory usage.
-- Process connectivity in chunks if it doesn't fit in RAM (`slice_mesh_fast` accepts a `chunk_size` parameter).
-- Set `edge_linewidth=0.0` in `plot_slice_fast` if the black cell outline isn't visually necessary.
-- Use PNG during tuning iterations (plane position, zoom, colormap), and only generate a PDF for the final figure (`rasterized=True` keeps text/axes/colorbar crisp and vectorial while keeping the file light).
-
-To plug them in: replace the calls to `slice_mesh(...)` and `plot_slice(...)` in `main()` with `slice_mesh_fast(...)` and `plot_slice_fast(...)`.
-
----
-
-## Repository structure
-
-```
-.
-├── mesh_slice_viridis.py   # main script
-├── slice_mesh_fast.py      # vectorized version of slice_mesh (large meshes)
-├── plot_slice_fast.py      # fast version of plot_slice, PNG/PDF choice
-└── README.md
-```
+On meshes with tens to hundreds of millions of tetrahedra, this script is optimize to be as fast as possible
 
 ---
 
